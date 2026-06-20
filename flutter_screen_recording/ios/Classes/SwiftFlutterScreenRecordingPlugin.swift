@@ -13,6 +13,9 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
 
     private let recorder = RPScreenRecorder.shared()
     private let writerQueue = DispatchQueue(label: "flutter_screen_recording.writer")
+    private let targetVideoFramesPerSecond: Int32 = 30
+    private let maxEncodedVideoLongEdge = 1_440
+    private let videoBufferBackpressure = DispatchSemaphore(value: 2)
 
     // These properties are read and written only on writerQueue.
     private var videoWriter: AVAssetWriter?
@@ -145,16 +148,38 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             handler: { [weak self] sampleBuffer, sampleBufferType, error in
                 guard let self = self else { return }
 
-                self.writerQueue.async {
-                    guard self.recordingID == newRecordingID, self.isRecording else {
-                        return
-                    }
+                if let error = error {
+                    self.writerQueue.async {
+                        guard self.recordingID == newRecordingID, self.isRecording else {
+                            return
+                        }
 
-                    if let error = error {
                         self.failRecording(
                             id: newRecordingID,
                             reason: "ReplayKit capture failed: \(error.localizedDescription)"
                         )
+                    }
+                    return
+                }
+
+                if sampleBufferType == .video {
+                    switch self.videoBufferBackpressure.wait(timeout: .now()) {
+                    case .success:
+                        break
+                    case .timedOut:
+                        return
+                    }
+                }
+
+                self.writerQueue.async {
+                    let shouldSignalVideoBuffer = sampleBufferType == .video
+                    defer {
+                        if shouldSignalVideoBuffer {
+                            self.videoBufferBackpressure.signal()
+                        }
+                    }
+
+                    guard self.recordingID == newRecordingID, self.isRecording else {
                         return
                     }
 
@@ -226,25 +251,30 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
             let rawWidth = Int(dimensions.width)
             let rawHeight = Int(dimensions.height)
-            let width = rawWidth - (rawWidth % 2)
-            let height = rawHeight - (rawHeight % 2)
+            let encodedSize = encodedVideoSize(width: rawWidth, height: rawHeight)
 
-            guard width > 0, height > 0 else {
+            guard encodedSize.width > 0, encodedSize.height > 0 else {
                 failRecording(
                     id: recordingID,
-                    reason: "ReplayKit returned invalid video dimensions \(width)x\(height)"
+                    reason: "ReplayKit returned invalid video dimensions \(rawWidth)x\(rawHeight)"
                 )
                 return
             }
 
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: width,
-                AVVideoHeightKey: height,
+                AVVideoWidthKey: encodedSize.width,
+                AVVideoHeightKey: encodedSize.height,
+                AVVideoScalingModeKey: AVVideoScalingModeResizeAspect,
                 AVVideoCompressionPropertiesKey: [
-                    AVVideoAverageBitRateKey: bitrate(width: width, height: height),
-                    AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                    AVVideoMaxKeyFrameIntervalKey: 60,
+                    AVVideoAverageBitRateKey: bitrate(
+                        width: encodedSize.width,
+                        height: encodedSize.height
+                    ),
+                    AVVideoProfileLevelKey: AVVideoProfileLevelH264MainAutoLevel,
+                    AVVideoExpectedSourceFrameRateKey: targetVideoFramesPerSecond,
+                    AVVideoMaxKeyFrameIntervalKey: targetVideoFramesPerSecond * 2,
+                    AVVideoAllowFrameReorderingKey: false,
                 ],
             ]
 
@@ -502,12 +532,51 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     private func bitrate(width: Int, height: Int) -> Int {
         switch width * height {
         case 3_000_000...:
-            return 16_000_000
+            return 9_000_000
         case 2_000_000...:
-            return 12_000_000
+            return 7_000_000
+        case 1_000_000...:
+            return 5_000_000
         default:
-            return 8_000_000
+            return 3_500_000
         }
+    }
+
+    private func encodedVideoSize(width: Int, height: Int) -> (width: Int, height: Int) {
+        let evenWidth = width - (width % 2)
+        let evenHeight = height - (height % 2)
+        let longEdge = max(evenWidth, evenHeight)
+
+        guard evenWidth > 0, evenHeight > 0, longEdge > maxEncodedVideoLongEdge else {
+            return (evenWidth, evenHeight)
+        }
+
+        let scale = Double(maxEncodedVideoLongEdge) / Double(longEdge)
+        let scaledWidth = max(2, Int(Double(evenWidth) * scale))
+        let scaledHeight = max(2, Int(Double(evenHeight) * scale))
+
+        return (
+            scaledWidth - (scaledWidth % 2),
+            scaledHeight - (scaledHeight % 2)
+        )
+    }
+
+    private func shouldDropVideoFrame(at timestamp: CMTime) -> Bool {
+        guard CMTIME_IS_VALID(timestamp),
+            let lastWrittenVideoTimestamp = lastWrittenVideoTimestamp,
+            CMTIME_IS_VALID(lastWrittenVideoTimestamp)
+        else {
+            return false
+        }
+
+        let minimumFrameDuration = CMTime(
+            value: 1,
+            timescale: targetVideoFramesPerSecond
+        )
+        return CMTimeCompare(
+            CMTimeSubtract(timestamp, lastWrittenVideoTimestamp),
+            minimumFrameDuration
+        ) < 0
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
