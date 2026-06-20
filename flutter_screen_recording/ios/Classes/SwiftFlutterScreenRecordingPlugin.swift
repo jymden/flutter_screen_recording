@@ -1,8 +1,8 @@
-import Flutter
-import UIKit
-import ReplayKit
 import AVFoundation
+import Flutter
 import ImageIO
+import ReplayKit
+import UIKit
 
 public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     private enum WriterSetupResult {
@@ -38,8 +38,9 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         switch call.method {
         case "startRecordScreen":
             guard let args = call.arguments as? [String: Any],
-                  let name = args["name"] as? String,
-                  let includeAudio = args["audio"] as? Bool else {
+                let name = args["name"] as? String,
+                let includeAudio = args["audio"] as? Bool
+            else {
                 deliver(
                     FlutterError(
                         code: "INVALID_ARGUMENTS",
@@ -209,9 +210,10 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     @available(iOS 11.0, *)
     private func handleVideoBuffer(_ sampleBuffer: CMSampleBuffer, recordingID: UUID) {
         guard self.recordingID == recordingID,
-              isRecording,
-              CMSampleBufferDataIsReady(sampleBuffer),
-              let writer = videoWriter else {
+            isRecording,
+            CMSampleBufferDataIsReady(sampleBuffer),
+            let writer = videoWriter
+        else {
             return
         }
 
@@ -242,8 +244,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
                 AVVideoCompressionPropertiesKey: [
                     AVVideoAverageBitRateKey: bitrate(width: width, height: height),
                     AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                    AVVideoMaxKeyFrameIntervalKey: 60
-                ]
+                    AVVideoMaxKeyFrameIntervalKey: 60,
+                ],
             ]
 
             let newVideoInput = AVAssetWriterInput(
@@ -266,7 +268,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
                 let audioSettings: [String: Any] = [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
                     AVSampleRateKey: 44_100,
-                    AVNumberOfChannelsKey: 2
+                    AVNumberOfChannelsKey: 2,
                 ]
                 let newAudioInput = AVAssetWriterInput(
                     mediaType: .audio,
@@ -307,7 +309,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         }
 
         guard let input = videoWriterInput,
-              input.isReadyForMoreMediaData else {
+            input.isReadyForMoreMediaData
+        else {
             return
         }
 
@@ -322,13 +325,14 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     @available(iOS 11.0, *)
     private func handleAudioBuffer(_ sampleBuffer: CMSampleBuffer, recordingID: UUID) {
         guard self.recordingID == recordingID,
-              isRecording,
-              sessionStarted,
-              CMSampleBufferDataIsReady(sampleBuffer),
-              let writer = videoWriter,
-              writer.status == .writing,
-              let input = audioWriterInput,
-              input.isReadyForMoreMediaData else {
+            isRecording,
+            sessionStarted,
+            CMSampleBufferDataIsReady(sampleBuffer),
+            let writer = videoWriter,
+            writer.status == .writing,
+            let input = audioWriterInput,
+            input.isReadyForMoreMediaData
+        else {
             return
         }
 
@@ -378,7 +382,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
 
             self.writerQueue.async {
                 guard self.recordingID == stoppingRecordingID,
-                      let writer = self.videoWriter else {
+                    let writer = self.videoWriter
+                else {
                     self.deliver(
                         FlutterError(
                             code: "STOP_ERROR",
@@ -460,7 +465,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             key: RPVideoSampleOrientationKey as CFString,
             attachmentModeOut: nil
         ) as? NSNumber,
-           let orientation = CGImagePropertyOrientation(rawValue: value.uint32Value) {
+            let orientation = CGImagePropertyOrientation(rawValue: value.uint32Value)
+        {
             return transform(for: orientation)
         }
 
