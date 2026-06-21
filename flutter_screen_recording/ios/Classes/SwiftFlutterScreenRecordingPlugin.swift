@@ -27,6 +27,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     private var recordAudio = false
     private var sessionStarted = false
     private var startInterfaceOrientation: UIInterfaceOrientation = .unknown
+    private var lastWrittenVideoTimestamp: CMTime?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
@@ -338,13 +339,20 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
 
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if shouldDropVideoFrame(at: presentationTime) {
+            return
+        }
+
         guard let input = videoWriterInput,
             input.isReadyForMoreMediaData
         else {
             return
         }
 
-        if !input.append(sampleBuffer) {
+        if input.append(sampleBuffer) {
+            lastWrittenVideoTimestamp = presentationTime
+        } else {
             failRecording(
                 id: recordingID,
                 reason: "Failed to append a video buffer: \(writer.error?.localizedDescription ?? "unknown error")"
@@ -492,8 +500,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         // Apple deprecated this key, so use it only when ReplayKit still supplies it.
         if let value = CMGetAttachment(
             sampleBuffer,
-            key: RPVideoSampleOrientationKey as CFString,
-            attachmentModeOut: nil
+            RPVideoSampleOrientationKey as CFString,
+            nil
         ) as? NSNumber,
             let orientation = CGImagePropertyOrientation(rawValue: value.uint32Value)
         {
@@ -629,6 +637,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         recordAudio = false
         sessionStarted = false
         startInterfaceOrientation = .unknown
+        lastWrittenVideoTimestamp = nil
     }
 
     private func removeOutputFile(atPath path: String?) {
