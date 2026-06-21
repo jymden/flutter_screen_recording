@@ -26,6 +26,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     private var isRecording = false
     private var recordAudio = false
     private var sessionStarted = false
+    private var lastWrittenVideoTimestamp: CMTime?
     private var startInterfaceOrientation: UIInterfaceOrientation = .unknown
 
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -344,7 +345,14 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
 
-        if !input.append(sampleBuffer) {
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if shouldDropVideoFrame(at: presentationTime) {
+            return
+        }
+
+        if input.append(sampleBuffer) {
+            lastWrittenVideoTimestamp = presentationTime
+        } else {
             failRecording(
                 id: recordingID,
                 reason: "Failed to append a video buffer: \(writer.error?.localizedDescription ?? "unknown error")"
@@ -492,8 +500,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         // Apple deprecated this key, so use it only when ReplayKit still supplies it.
         if let value = CMGetAttachment(
             sampleBuffer,
-            key: RPVideoSampleOrientationKey as CFString,
-            attachmentModeOut: nil
+            RPVideoSampleOrientationKey as CFString,
+            nil
         ) as? NSNumber,
             let orientation = CGImagePropertyOrientation(rawValue: value.uint32Value)
         {
@@ -628,6 +636,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         isRecording = false
         recordAudio = false
         sessionStarted = false
+        lastWrittenVideoTimestamp = nil
         startInterfaceOrientation = .unknown
     }
 
