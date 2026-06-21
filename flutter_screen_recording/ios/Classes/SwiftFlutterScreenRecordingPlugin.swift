@@ -500,8 +500,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         // Apple deprecated this key, so use it only when ReplayKit still supplies it.
         if let value = CMGetAttachment(
             sampleBuffer,
-            RPVideoSampleOrientationKey as CFString,
-            nil
+            key: RPVideoSampleOrientationKey as CFString,
+            attachmentModeOut: nil
         ) as? NSNumber,
             let orientation = CGImagePropertyOrientation(rawValue: value.uint32Value)
         {
@@ -570,9 +570,9 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     }
 
     private func shouldDropVideoFrame(at timestamp: CMTime) -> Bool {
-        guard CMTIME_IS_VALID(timestamp),
+        guard timestamp.isValid,
             let lastWrittenVideoTimestamp = lastWrittenVideoTimestamp,
-            CMTIME_IS_VALID(lastWrittenVideoTimestamp)
+            lastWrittenVideoTimestamp.isValid
         else {
             return false
         }
