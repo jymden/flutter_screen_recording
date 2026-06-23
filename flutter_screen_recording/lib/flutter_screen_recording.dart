@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screen_recording_platform_interface/flutter_screen_recording_platform_interface.dart';
 
@@ -70,6 +71,33 @@ class FlutterScreenRecording {
       print(err);
     }
     return "";
+  }
+
+  static const EventChannel _eventChannel =
+      EventChannel('flutter_screen_recording/events');
+  static Stream<Map<String, dynamic>>? _recordingEvents;
+
+  /// Optional, additive stream of recording lifecycle events (async stop / errors).
+  ///
+  /// Purely additive — the existing `startRecordScreen` / `startRecordScreenAndAudio` /
+  /// `stopRecordScreen` API is unchanged, and listening here is never required. Currently backed
+  /// by the Android implementation; on web/iOS this is an empty stream until those platforms add
+  /// native events.
+  ///
+  /// Events are maps, e.g.:
+  ///  * `{"event": "stopped", "reason": "projection_stopped"}` — the OS/user stopped the capture
+  ///    (not via [stopRecordScreen]); the host should reconcile its own recording state.
+  ///  * `{"event": "error", "reason": "media_recorder_error", "what": <int>, "extra": <int>}` —
+  ///    a mid-recording encoder error.
+  static Stream<Map<String, dynamic>> get recordingEvents {
+    if (kIsWeb || !Platform.isAndroid) {
+      return const Stream.empty();
+    }
+    _recordingEvents ??=
+        _eventChannel.receiveBroadcastStream().map<Map<String, dynamic>>(
+              (dynamic event) => Map<String, dynamic>.from(event as Map),
+            );
+    return _recordingEvents!;
   }
 
   static _maybeStartFGS(String titleNotification, String messageNotification) {

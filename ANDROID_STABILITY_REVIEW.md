@@ -10,7 +10,7 @@ and `build.gradle`.
 
 ## Status overview
 
-**Progress: 4 of 19 addressed** (3 fully fixed, 1 partial). Sorted by severity. Click an issue
+**Progress: 5 of 19 addressed** (4 fully fixed, 1 partial). Sorted by severity. Click an issue
 code to jump to its full description.
 
 **Status legend:** 🟢 Fixed · 🟡 Partially fixed · 🟠 Open (not started)
@@ -22,7 +22,7 @@ code to jump to its full description.
 | [H3](#h3) | High | 🟢 Fixed (2026-06-23) | Failed `start()` reported to Dart as success → empty file / state desync |
 | [M1](#m1) | Medium | 🟢 Fixed (2026-06-23) | `MediaRecorder` never `release()`d/nulled → native encoder leak |
 | [M2](#m2) | Medium | 🟠 Open | Microphone source contention with the camera/ML Kit pipeline (silent audio failure) |
-| [M3](#m3) | Medium | 🟠 Open | System/user-stopped projection is invisible to Dart |
+| [M3](#m3) | Medium | 🟢 Fixed (2026-06-23) | System/user-stopped projection is invisible to Dart |
 | [M4](#m4) | Medium | 🟠 Open | `getMediaProjection` vs. foreground-service ordering race (Android 14+) |
 | [M5](#m5) | Medium | 🟠 Open | Recorder `prepare()`/`start()` run on the main thread (ANR risk) |
 | [M6](#m6) | Medium | 🟠 Open | `stopService` via `startService` can throw in background |
@@ -352,7 +352,43 @@ defaults from `call.argument<Boolean?>`), though it's currently inside the swall
    recommend video-only while a camera/audio capture session is live — mirror the iOS "Using
    alongside a camera" guidance.
 
-### <a id="m3"></a>M3 — System/user revocation of the projection is invisible to Dart
+### <a id="m3"></a>M3 — System/user revocation of the projection is invisible to Dart — ✅ FIXED (2026-06-23)
+
+> **Status:** Implemented as a **fully additive** event channel — the existing
+> `startRecordScreen` / `startRecordScreenAndAudio` / `stopRecordScreen` API is byte-for-byte
+> unchanged; listening to events is optional and never required.
+>
+> **Native (`FlutterScreenRecordingPlugin.kt`):**
+> - Registered an `EventChannel("flutter_screen_recording/events")` on the engine messenger in
+>   `onAttachedToEngine` (torn down in `onDetachedFromEngine`), with a main-thread-safe
+>   `sendEvent()` helper (`Handler(Looper.getMainLooper())`) that no-ops when nobody is listening.
+> - `MediaProjectionCallback.onStop()` now emits `{"event":"stopped","reason":"projection_stopped"}`
+>   — but only when the stop did **not** originate from the app's own `stopRecordScreen()`
+>   (tracked by a `@Volatile stopRequestedByApp` flag, set in the stop branch and reset on a new
+>   start). So the host is notified exactly when the OS/user/another app ends the capture.
+> - Bonus error reporting: `MediaRecorder.setOnErrorListener` emits
+>   `{"event":"error","reason":"media_recorder_error","what":…,"extra":…}` for async mid-recording
+>   encoder errors.
+>
+> **Dart:** exposed as `FlutterScreenRecording.recordingEvents`
+> (`Stream<Map<String, dynamic>>`).
+>
+> **Design note — why not the platform interface:** the app-facing package depends on the
+> **published** `flutter_screen_recording_platform_interface ^1.0.3` (resolved from pub.dev, not
+> the local copy), so routing the stream through the platform interface would require
+> republishing it and would not reach a consuming app without a version bump. To keep this
+> working "exactly as before, plus events" with no republish, the stream is implemented directly
+> in the app-facing package via its own `EventChannel` of the same name, guarded with
+> `if (kIsWeb || !Platform.isAndroid) return const Stream.empty();` (consistent with the existing
+> `Platform.isAndroid` guards in this file). This also avoids a `MissingPluginException` on iOS,
+> which has no event channel yet.
+>
+> **Follow-up:** when iOS gains its own event channel (iOS M1/M4), widen the platform guard;
+> consider migrating to the federated platform-interface path if/when the interface package is
+> republished. The "return the file path on external stop" gap (external stop nulls the recorder,
+> so a later `stopRecordScreen()` returns `""`) is noted but out of scope here. Verified: Dart
+> `flutter analyze` clean for both packages + example app builds a debug APK
+> (`✓ Built app-debug.apk`). Original analysis below.
 
 **Where:** `MediaProjectionCallback.onStop` (351–357).
 
@@ -538,8 +574,10 @@ clean up opportunistically.
    genuinely started recorder (**H3 done — 2026-06-23**), and always `release()`+null the recorder
    (**M1 done — 2026-06-23**). *(Eliminates the "silent vanished recording" + encoder leak — the
    most likely real-world failure under camera/ML Kit load.)*
-3. **M3 + M8** — add the `EventChannel` for async stop/failure and make `pendingResult` one-shot
-   with a watchdog + Dart timeout. *(Removes the silent-failure / hung-Future state desyncs.)*
+3. **M3 ✅ + M8** — add the `EventChannel` for async stop/failure (**M3 done — 2026-06-23**,
+   additive `FlutterScreenRecording.recordingEvents` stream) and make `pendingResult` one-shot
+   with a watchdog + Dart timeout (M8 pending). *(Removes the silent-failure / hung-Future state
+   desyncs.)*
 4. **M2 + M9** — explicit audio capability reporting + encoder-aware resolution clamping +
    README "Using alongside a camera/microphone" guidance. *(Directly addresses concurrent-camera
    contention.)*

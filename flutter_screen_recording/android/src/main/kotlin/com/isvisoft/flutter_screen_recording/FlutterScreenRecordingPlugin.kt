@@ -13,11 +13,14 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
@@ -61,9 +64,29 @@ class FlutterScreenRecordingPlugin :
 
     private var serviceConnection: ServiceConnection? = null
 
+    private var eventChannel: EventChannel? = null
+    private var eventSink: EventChannel.EventSink? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // True while the app itself requested the stop, so we don't emit an "external stop" event for
+    // a teardown the caller already initiated.
+    @Volatile
+    private var stopRequestedByApp = false
+
     private fun completePendingResult(value: Boolean) {
         pendingResult?.success(value)
         pendingResult = null
+    }
+
+    /** Emits an optional lifecycle event to Dart on the main thread; no-op if nobody is listening. */
+    private fun sendEvent(body: Map<String, Any?>) {
+        mainHandler.post {
+            try {
+                eventSink?.success(body)
+            } catch (e: Exception) {
+                Log.d("ScreenRecordingPlugin", "sendEvent failed: " + e.message)
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
@@ -171,6 +194,7 @@ class FlutterScreenRecordingPlugin :
                     }
 
                     pendingResult = result
+                    stopRequestedByApp = false
                     val title = call.argument<String?>("title")
                     val message = call.argument<String?>("message")
 
@@ -225,6 +249,7 @@ class FlutterScreenRecordingPlugin :
             }
 
             "stopRecordScreen" -> {
+                stopRequestedByApp = true
                 try {
                     serviceConnection?.let {
                         appContext.unbindService(it)
@@ -287,6 +312,18 @@ class FlutterScreenRecordingPlugin :
             } else {
                 @Suppress("DEPRECATION")
                 mMediaRecorder = MediaRecorder()
+            }
+
+            // Surface asynchronous, mid-recording encoder errors to Dart (optional listener).
+            mMediaRecorder?.setOnErrorListener { _, what, extra ->
+                sendEvent(
+                    mapOf(
+                        "event" to "error",
+                        "reason" to "media_recorder_error",
+                        "what" to what,
+                        "extra" to extra
+                    )
+                )
             }
 
             try {
@@ -417,9 +454,26 @@ class FlutterScreenRecordingPlugin :
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         pluginBinding = binding
+        // Additive, optional event stream for async stop/error reporting. Registered on the engine
+        // messenger so it is independent of the Activity lifecycle. It does not affect the existing
+        // MethodChannel API in any way — apps that don't listen are completely unaffected.
+        eventChannel = EventChannel(binding.binaryMessenger, "flutter_screen_recording/events")
+        eventChannel?.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                eventSink = events
+            }
+
+            override fun onCancel(arguments: Any?) {
+                eventSink = null
+            }
+        })
     }
 
-    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {}
+    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        eventChannel?.setStreamHandler(null)
+        eventChannel = null
+        eventSink = null
+    }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activityBinding = binding
@@ -450,6 +504,11 @@ class FlutterScreenRecordingPlugin :
             releaseMediaRecorder()
             mMediaProjection = null
             stopScreenSharing()
+            // If this stop did NOT originate from the app's own stopRecordScreen(), notify Dart so
+            // the host can reconcile its recording state instead of silently desyncing.
+            if (!stopRequestedByApp) {
+                sendEvent(mapOf("event" to "stopped", "reason" to "projection_stopped"))
+            }
         }
     }
 }
