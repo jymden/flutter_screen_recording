@@ -205,7 +205,33 @@ denied. It is dead-but-dangerous code.
 
 ---
 
-### H3 — `startRecordScreen()` swallows failures but the caller reports success → state desync + later `stop()` crash
+### H3 — `startRecordScreen()` swallows failures but the caller reports success → state desync + later `stop()` crash — ✅ FIXED (2026-06-23)
+
+> **Status:** Implemented in `FlutterScreenRecordingPlugin.kt`.
+> (a) `startRecordScreen()` now returns `Boolean` — `true` only after `prepare()` + `start()`
+> actually succeed; every failure path (`IOException` building the filename, or any exception
+> through the setup/`prepare`/`start` chain) returns `false`.
+> (b) `onServiceConnected` now aborts the chain on failure instead of always reporting success:
+> a `false` from `startRecordScreen()`, a missing `MediaProjectionManager`, or a null
+> `createVirtualDisplay()` each throw into the catch, so Dart receives `false` and the host app
+> learns the recording never started (no more "empty file, no error").
+> (c) Added a crash-safe `abortPartialSetup(context)` that rolls back any partial state on
+> failure — releases the recorder (via M1's `releaseMediaRecorder()`), releases the virtual
+> display, unregisters + stops the projection, unbinds the service, and stops the foreground
+> service — so nothing leaks and a later `stopRecordScreen()` can't act on half-initialised
+> state. This also closes the original behaviour where the failure path left the foreground
+> service running and the recorder leaked.
+>
+> **Real-world relevance:** this is the item that actually bites this app — under camera/ML Kit
+> encoder or microphone contention, `start()` can fail, and previously that was reported as a
+> successful recording. Now it surfaces as `startRecordScreen()` → `false` in Dart.
+>
+> **Note / follow-up:** the failure is now reported on the *start* path (the `Future` resolves
+> `false`). Failures that happen *after* a successful start (mid-recording, or system/user
+> stopping the projection) still need the M3 event channel to reach Dart — H3 does not cover
+> that. The `recordAudio!!` force-unwrap inside `startRecordScreen()` was intentionally left for
+> M2; if it ever NPEs it is now caught and correctly reported as a failed start. Verified:
+> example app builds a debug APK (`✓ Built app-debug.apk`, 0 errors). Original analysis below.
 
 **Where:** `startRecordScreen()` (241–286) catches *all* exceptions and returns `Unit`;
 `onServiceConnected` (90–106) calls it, then unconditionally builds the virtual display and calls
@@ -479,8 +505,8 @@ clean up opportunistically.
    force-unwrap removal (**H1 done — 2026-06-23**), and the `this as Activity` service crash
    (**H2 crash-safe guard done — 2026-06-23**; permission-request removal deferred for
    investigation). *(Small, self-contained, removes the hard crashes.)*
-2. **H3 + M1 ✅** — make `startRecordScreen()` report failure, only report `true` on a genuinely
-   started recorder (H3 pending), and always `release()`+null the recorder
+2. **H3 ✅ + M1 ✅** — make `startRecordScreen()` report failure, only report `true` on a
+   genuinely started recorder (**H3 done — 2026-06-23**), and always `release()`+null the recorder
    (**M1 done — 2026-06-23**). *(Eliminates the "silent vanished recording" + encoder leak — the
    most likely real-world failure under camera/ML Kit load.)*
 3. **M3 + M8** — add the `EventChannel` for async stop/failure and make `pendingResult` one-shot

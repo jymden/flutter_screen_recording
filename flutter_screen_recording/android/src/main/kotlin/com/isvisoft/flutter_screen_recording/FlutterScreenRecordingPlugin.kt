@@ -3,6 +3,7 @@ package com.isvisoft.flutter_screen_recording
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.hardware.display.DisplayManager
@@ -93,19 +94,31 @@ class FlutterScreenRecordingPlugin :
                     override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
 
                         try {
-                            startRecordScreen()
+                            // Order matters: the projection + virtual display feed frames into the
+                            // recorder's input surface, so the recorder must be prepared/started
+                            // first. If start() fails (e.g. the encoder or microphone is held by a
+                            // concurrent camera/ML Kit pipeline) we must NOT report success —
+                            // otherwise Dart believes a recording is running and later receives an
+                            // empty/corrupt file with no error.
+                            if (!startRecordScreen()) {
+                                throw IllegalStateException("MediaRecorder failed to prepare/start")
+                            }
                             mMediaProjectionCallback = MediaProjectionCallback()
                             val projectionManager = projectionManager()
                                 ?: throw IllegalStateException("MediaProjectionManager is unavailable")
                             mMediaProjection = projectionManager.getMediaProjection(resultCode, data!!)
                             mMediaProjection?.registerCallback(mMediaProjectionCallback!!, null)
                             mVirtualDisplay = createVirtualDisplay()
+                                ?: throw IllegalStateException("Could not create VirtualDisplay")
                             completePendingResult(true)
 
                         } catch (e: Throwable) {
                             e.message?.let {
                                 Log.e("ScreenRecordingPlugin", it)
                             }
+                            // Roll back any partial setup so nothing leaks and a later
+                            // stopRecordScreen() cannot act on half-initialised state.
+                            abortPartialSetup(context)
                             completePendingResult(false)
                         }
                     }
@@ -266,7 +279,7 @@ class FlutterScreenRecordingPlugin :
         }
     }
 
-    private fun startRecordScreen() {
+    private fun startRecordScreen(): Boolean {
         try {
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -285,7 +298,7 @@ class FlutterScreenRecordingPlugin :
                 mFileName += "/$videoName.mp4"
             } catch (e: IOException) {
                 println("Error creating name")
-                return
+                return false
             }
 
             mMediaRecorder?.setVideoSource(MediaRecorder.VideoSource.SURFACE)
@@ -304,11 +317,13 @@ class FlutterScreenRecordingPlugin :
 
             mMediaRecorder?.prepare()
             mMediaRecorder?.start()
+            return true
 
         } catch (e: Exception) {
             Log.d("--INIT-RECORDER", e.message + "")
             println("Error startRecordScreen")
             println(e.message)
+            return false
         }
 
     }
@@ -370,6 +385,34 @@ class FlutterScreenRecordingPlugin :
             }
             Log.d("TAG", "MediaProjection Stopped")
         }
+    }
+
+    /**
+     * Tears down any partially-initialised recording state after a failed start, so we never leak
+     * the recorder/projection and a later stopRecordScreen() can't operate on half state. Every
+     * step is null-safe and guarded so this can itself never throw.
+     */
+    private fun abortPartialSetup(context: Context) {
+        releaseMediaRecorder()
+        try {
+            mVirtualDisplay?.release()
+            mMediaProjectionCallback?.let { mMediaProjection?.unregisterCallback(it) }
+            mMediaProjection?.stop()
+        } catch (e: Exception) {
+            Log.d("ScreenRecordingPlugin", "abortPartialSetup projection: " + e.message)
+        } finally {
+            mVirtualDisplay = null
+            mMediaProjection = null
+            mMediaProjectionCallback = null
+        }
+        try {
+            serviceConnection?.let { context.unbindService(it) }
+        } catch (e: Exception) {
+            Log.d("ScreenRecordingPlugin", "abortPartialSetup unbind: " + e.message)
+        } finally {
+            serviceConnection = null
+        }
+        ForegroundService.stopService(context)
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
