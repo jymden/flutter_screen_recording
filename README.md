@@ -57,12 +57,39 @@ The example app requests permissions with `permission_handler` before starting r
 
 The iOS implementation uses `ReplayKit` and requires `iOS 11.0+`.
 
-Add the usage description for microphone access if you record audio:
+### Microphone audio
+
+If you call `startRecordScreenAndAudio`, your app **must** declare a microphone usage
+description, otherwise iOS terminates the process the moment ReplayKit touches the
+microphone (a privacy/TCC kill that cannot be caught):
 
 ```xml
 <key>NSMicrophoneUsageDescription</key>
 <string>Save audio in video</string>
 ```
+
+To protect against that crash, the plugin checks for this key before enabling the
+microphone. If it is missing, `startRecordScreenAndAudio` fails with the error code
+`MIC_USAGE_DESCRIPTION_MISSING` instead of crashing — so a misconfigured `Info.plist`
+surfaces as a normal failure (the Dart API returns `false`). Recording **without** audio
+(`startRecordScreen`) never requires the key.
+
+### Using alongside a camera / `AVCaptureSession`
+
+ReplayKit shares the single, process-wide `AVAudioSession` with any `AVCaptureSession`
+your app runs (e.g. a camera preview feeding an ML pipeline). When the ReplayKit
+microphone is enabled it activates that shared session, which can otherwise interrupt a
+running capture session.
+
+- **Recommended:** while a camera session is active, record **video only**
+  (`startRecordScreen`). The screen recording already captures whatever the camera
+  preview is showing, so audio is often unnecessary.
+- If you do need microphone audio, the plugin configures the shared session
+  cooperatively (it adds `AVAudioSession`'s `.mixWithOthers` option, preserving your
+  app's existing category and mode and never calling `setActive`) to minimise the chance
+  of interrupting your capture session. This is best-effort; for full control you should
+  configure your own audio session (typically `.playAndRecord` with `.mixWithOthers`) and
+  observe `AVAudioSession.interruptionNotification` to re-activate it as needed.
 
 The plugin returns the local output file path. If your app later saves the file to the Photos library, also add the appropriate Photos usage description to your app.
 

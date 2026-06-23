@@ -84,6 +84,22 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
 
+        // Enabling RPScreenRecorder's microphone without NSMicrophoneUsageDescription
+        // makes iOS terminate the app — a privacy (TCC) kill that cannot be caught.
+        // Refuse the audio request up front so a misconfigured Info.plist degrades to a
+        // catchable error instead of a crash. (No writer state has been created yet.)
+        if recordAudio, !hasMicrophoneUsageDescription() {
+            deliver(
+                FlutterError(
+                    code: "MIC_USAGE_DESCRIPTION_MISSING",
+                    message: "Audio recording requires the NSMicrophoneUsageDescription key in Info.plist. Add it, or record without audio.",
+                    details: nil
+                ),
+                to: result
+            )
+            return
+        }
+
         let orientation = currentInterfaceOrientation()
         let documentsURL = FileManager.default.urls(
             for: .documentDirectory,
@@ -145,6 +161,9 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             break
         }
 
+        if recordAudio {
+            configureAudioSessionForCoexistence()
+        }
         recorder.isMicrophoneEnabled = recordAudio
         recorder.startCapture(
             handler: { [weak self] sampleBuffer, sampleBufferType, error in
@@ -727,6 +746,39 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
         try? FileManager.default.removeItem(atPath: path)
+    }
+
+    private func hasMicrophoneUsageDescription() -> Bool {
+        guard let description = Bundle.main.object(
+            forInfoDictionaryKey: "NSMicrophoneUsageDescription"
+        ) as? String else {
+            return false
+        }
+        return !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // Adds the cooperative .mixWithOthers option to whatever audio session the host app
+    // already configured (for example for its camera / AVCaptureSession), so enabling the
+    // ReplayKit microphone is far less likely to interrupt the host's capture session.
+    //
+    // This is intentionally conservative: it preserves the host's category and mode and
+    // only augments the options, never calls setActive(_:), and treats any error as
+    // non-fatal. The host app owns the audio session, so recording continues even if this
+    // cannot be applied.
+    private func configureAudioSessionForCoexistence() {
+        let session = AVAudioSession.sharedInstance()
+        let options = session.categoryOptions
+        guard !options.contains(.mixWithOthers) else { return }
+
+        do {
+            try session.setCategory(
+                session.category,
+                mode: session.mode,
+                options: options.union(.mixWithOthers)
+            )
+        } catch {
+            print("flutter_screen_recording: could not enable .mixWithOthers on the audio session; continuing without it: \(error.localizedDescription)")
+        }
     }
 
     private func deliver(_ value: Any?, to result: @escaping FlutterResult) {
