@@ -40,11 +40,51 @@ camera/ML Kit stack uses) and the **hardware H.264 encoder** (your ML Kit pipeli
 full-resolution screen encode). Both contention cases currently fail *silently* and desync Dart
 state rather than reporting an error. Several issues below center on that.
 
+### Real-world signal (updated 2026-06-23)
+
+The app author reports **no observed crashes on Android in practice** — the crashes that
+motivated this work were iOS-only. This is consistent with the code, and it refines how to read
+the severities below:
+
+- Android wraps nearly every native call in `try/catch(Exception)`/`catch(Throwable)`, and the
+  two "hard-crash" items (H1, H2) only fire on **narrow edge cases** — H1 needs the Activity to
+  be destroyed/recreated *during* the permission flow (rotation, "Don't keep activities",
+  low-memory); H2 needs `FOREGROUND_SERVICE_MEDIA_PROJECTION` (a normal, install-time-granted
+  permission) to report *denied* on Android 14+, which essentially never happens. A typical
+  single-orientation app simply never hits them. That is why Android has felt stable.
+- The issues that actually bite this app are **not crashes** but **silent failures, resource
+  leaks, and Dart/native state desync**: H3 (a failed `start()` is reported as success → empty
+  file), M1 (encoder leak over many record cycles), M3 (system/user-stopped projection never
+  reaches Dart), and the contention cases M2 (mic) / M9 (encoder limits). These degrade quietly
+  and are the real return-on-effort here.
+
+**Reframing, not downgrading.** Because this is a *public package* used by other apps and OS
+versions, the crash items keep their HIGH classification (they are genuine crashes where they
+fire). But for *this* app the priority order is the robustness items — see the updated
+implementation order at the bottom. H1/H2/M1 were still worth doing: H1 also fixes a real
+Activity **leak** in a long-running camera app, M1 fixes a real encoder leak, and H2's guard is
+cheap insurance.
+
 ---
 
 ## HIGH risk
 
-### H1 — Stale `Activity` binding + force-unwraps → NPE/crash and a leaked Activity
+### H1 — Stale `Activity` binding + force-unwraps → NPE/crash and a leaked Activity — ✅ FIXED (2026-06-23)
+
+> **Status:** Implemented in `FlutterScreenRecordingPlugin.kt`.
+> (a) `onDetachedFromActivity()` now removes the `ActivityResultListener` and nulls
+> `activityBinding`; `onDetachedFromActivityForConfigChanges()` delegates to it; and
+> `onReattachedToActivityForConfigChanges()` re-adds the listener instead of only overwriting
+> the binding — so the destroyed Activity is no longer retained and the listener is never
+> stale/double-registered.
+> (b) Force-unwraps were replaced with guarded access: `onMethodCall` fails with
+> `FlutterError("NO_CONTEXT", …)` if no plugin context; the `startRecordScreen` branch resolves
+> a guarded `activity` (→ `"NO_ACTIVITY"`) before touching `pendingResult`; `onActivityResult`
+> guards the context and completes the pending result with `false` instead of NPE-ing.
+> (c) The throwing `mProjectionManager by lazy` was replaced with a nullable
+> `projectionManager()` helper; callers degrade gracefully (`"NO_PROJECTION_MANAGER"` /
+> caught in `onServiceConnected`). Verified: example app builds a debug APK
+> (`✓ Built app-debug.apk`, 0 errors). Original analysis below.
 
 **Where:** `onDetachedFromActivity()` is empty (line 349); `activityBinding!!` is force-unwrapped
 in `onMethodCall` setup (lines 157, 161, 171–172); `pluginBinding!!` is force-unwrapped in
@@ -93,7 +133,41 @@ elsewhere.
 
 ---
 
-### H2 — `ForegroundService` requests permissions via `this as Activity` → `ClassCastException` crash
+### H2 — `ForegroundService` requests permissions via `this as Activity` → `ClassCastException` crash — 🟡 PARTIALLY FIXED (2026-06-23)
+
+> **Status:** Crash-safe guard implemented in `ForegroundService.kt`; the permission-request
+> logic was intentionally **kept** for further investigation (per request).
+>
+> **What was done (the safe guard):**
+> 1. Wrapped the `ActivityCompat.requestPermissions(this as Activity, …)` call in its own
+>    `try/catch` so the `ClassCastException` can never abort `onStartCommand`.
+> 2. **Hoisted `startForegroundServiceWithNotification(intent)` so it is now called
+>    unconditionally**, after the permission block, on every path (granted / denied / pre-14).
+>
+> **Why this is the real fix.** The `ClassCastException` itself was already caught by the
+> existing outer `catch (err: Exception)` — so it never crashed directly. The *actual* crash
+> was a second-order effect: on the permission-denied branch the throw skipped
+> `startForegroundServiceWithNotification(intent)` entirely, so the service never called
+> `startForeground()` within the system window and Android killed the process with an
+> **uncatchable** `ForegroundServiceDidNotStartInTimeException`. Guaranteeing `startForeground()`
+> always runs is what removes the crash. The host app using the package will no longer be
+> terminated by this path.
+>
+> **What was deliberately NOT done (deferred for investigation):**
+> - The `checkSelfPermission` + `requestPermissions(this as Activity, …)` request is still
+>   present (now wrapped). It remains a no-op in practice — you cannot request runtime
+>   permissions from a `Service`, and `FOREGROUND_SERVICE_MEDIA_PROJECTION` is a normal,
+>   install-time-granted permission anyway. The eventual fix (per the original analysis) is to
+>   delete the request and either just foreground unconditionally or check-and-fail-fast.
+> - The typed `startForeground(id, notification, FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)`
+>   overload (API 29+) was not adopted yet — still using the 2-arg form. Revisit together with
+>   the deferred removal and M4 (FGS readiness ordering).
+>
+> **Note for the next pass:** in the genuinely-denied edge case (a ROM that reports the normal
+> permission as denied), `startForeground` for a `mediaProjection` service can still throw
+> `SecurityException`; it is caught by the outer handler but the service may then fail to
+> foreground. This is rare and tied to the deferred full fix. Verified: example app builds a
+> debug APK (`✓ Built app-debug.apk`, 0 errors). Original analysis below.
 
 **Where:** `ForegroundService.onStartCommand`, Android-14 branch (lines 73–87).
 
@@ -167,7 +241,17 @@ Dart — the single most likely real-world failure in a concurrent-camera app.
 
 ## MEDIUM risk
 
-### M1 — `MediaRecorder` is never `release()`d or nulled → native encoder leak
+### M1 — `MediaRecorder` is never `release()`d or nulled → native encoder leak — ✅ FIXED (2026-06-23)
+
+> **Status:** Implemented in `FlutterScreenRecordingPlugin.kt`. Added a single crash-safe
+> `releaseMediaRecorder()` helper that `reset()` + `release()`s the recorder (release was
+> previously never called) inside a `try/catch` and always nulls `mMediaRecorder` in `finally`.
+> `stopRecordScreen()` now tears down through it in its `finally` (and no longer leaves a
+> reset-but-non-null recorder), and `MediaProjectionCallback.onStop()` uses the same helper.
+> This frees the codec every record/stop cycle, stops the `!= null` guard from sticking across
+> sessions, and makes the two teardown paths idempotent (closing a double-release/double-stop
+> crash path). Verified: example app builds a debug APK (`✓ Built app-debug.apk`, 0 errors).
+> Original analysis below.
 
 **Where:** `stopRecordScreen` (288–303) calls `stop()` + `reset()` but never `release()`, and
 never sets `mMediaRecorder = null`. `MediaProjectionCallback.onStop` (352–356) only calls
@@ -383,12 +467,22 @@ clean up opportunistically.
 
 ## Suggested implementation order (for the fixing agent)
 
-1. **H1 + H2** — fix the two real crash paths first: proper Activity-lifecycle handling +
-   force-unwrap removal, and delete the `this as Activity` permission request from the service.
-   *(Small, self-contained, removes the hard crashes.)*
-2. **H3 + M1** — make `startRecordScreen()` report failure, only report `true` on a genuinely
-   started recorder, and always `release()`+null the recorder. *(Eliminates the "silent vanished
-   recording" + encoder leak — the most likely real-world failure under camera/ML Kit load.)*
+> **Recommended next step for this app (given no observed Android crashes): H3.** With the crash
+> edges (H1/H2) guarded and the encoder leak (M1) closed, the highest-value remaining work is
+> robustness, not crash-proofing. **H3** is the top priority — today a failed `start()` (encoder
+> or mic held by the camera/ML Kit pipeline) is reported to Dart as a *successful* recording,
+> producing an empty file with no signal. **M3** (surface system/user-driven stops to Dart) and
+> **M2/M9** (report mic/encoder contention instead of failing silently) come next. The crash
+> items stay HIGH for other consumers of the package, but they are not what degrades this app.
+
+1. **H1 ✅ + H2 🟡** — fix the two real crash paths first: proper Activity-lifecycle handling +
+   force-unwrap removal (**H1 done — 2026-06-23**), and the `this as Activity` service crash
+   (**H2 crash-safe guard done — 2026-06-23**; permission-request removal deferred for
+   investigation). *(Small, self-contained, removes the hard crashes.)*
+2. **H3 + M1 ✅** — make `startRecordScreen()` report failure, only report `true` on a genuinely
+   started recorder (H3 pending), and always `release()`+null the recorder
+   (**M1 done — 2026-06-23**). *(Eliminates the "silent vanished recording" + encoder leak — the
+   most likely real-world failure under camera/ML Kit load.)*
 3. **M3 + M8** — add the `EventChannel` for async stop/failure and make `pendingResult` one-shot
    with a watchdog + Dart timeout. *(Removes the silent-failure / hung-Future state desyncs.)*
 4. **M2 + M9** — explicit audio capability reporting + encoder-aware resolution clamping +

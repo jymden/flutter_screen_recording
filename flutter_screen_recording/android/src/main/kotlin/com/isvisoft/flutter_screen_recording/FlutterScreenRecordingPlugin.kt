@@ -317,16 +317,33 @@ class FlutterScreenRecordingPlugin :
         try {
             println("stopRecordScreen")
             mMediaRecorder?.stop()
-            mMediaRecorder?.reset()
             println("stopRecordScreen success")
 
         } catch (e: Exception) {
+            // stop() throws (IllegalStateException/RuntimeException) when it is called before any
+            // frame was written or too soon after start(). The output file may be empty/corrupt,
+            // but this is an expected, recoverable condition — never a crash.
             Log.d("--INIT-RECORDER", e.message + "")
             println("stopRecordScreen error")
             println(e.message)
 
         } finally {
+            // Always release the native MediaRecorder (and its codec) and clear the reference,
+            // otherwise every record/stop cycle leaks an encoder instance and eventually starves
+            // other encoders in the app (e.g. a concurrent camera pipeline).
+            releaseMediaRecorder()
             stopScreenSharing()
+        }
+    }
+
+    private fun releaseMediaRecorder() {
+        try {
+            mMediaRecorder?.reset()
+            mMediaRecorder?.release()
+        } catch (e: Exception) {
+            Log.d("--INIT-RECORDER", "releaseMediaRecorder: " + e.message)
+        } finally {
+            mMediaRecorder = null
         }
     }
 
@@ -384,7 +401,10 @@ class FlutterScreenRecordingPlugin :
 
     inner class MediaProjectionCallback : MediaProjection.Callback() {
         override fun onStop() {
-            mMediaRecorder?.reset()
+            // The projection can be torn down by the system or the user (stop button in the
+            // system UI). Release the recorder here too so the codec is freed and the reference
+            // is cleared, keeping this path idempotent with stopRecordScreen().
+            releaseMediaRecorder()
             mMediaProjection = null
             stopScreenSharing()
         }

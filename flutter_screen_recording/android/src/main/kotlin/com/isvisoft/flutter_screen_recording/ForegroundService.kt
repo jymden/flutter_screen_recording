@@ -70,29 +70,40 @@ class ForegroundService : Service() {
                 println("-------------------------- onStartCommand")
 
                 // Verificar permisos en Android 14 (SDK 34)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    if (ContextCompat.checkSelfPermission(
-                            this,
-                            Manifest.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION
-                        )
-                        == PackageManager.PERMISSION_DENIED
-                    ) {
-                        println("MediaProjection permission not granted, requesting permission")
+                // H2 (PARTIAL FIX): we still attempt to surface the
+                // FOREGROUND_SERVICE_MEDIA_PROJECTION permission state here, but requesting a
+                // runtime permission from a Service is not valid — `this` is a Service, not an
+                // Activity, so `this as Activity` throws ClassCastException. The request is now
+                // wrapped so it can NEVER abort onStartCommand, and we ALWAYS promote to the
+                // foreground afterwards. Without that, the throw skipped startForeground() and
+                // the system killed the process with an uncatchable
+                // ForegroundServiceDidNotStartInTimeException. Removing the request entirely is
+                // intentionally deferred pending further investigation.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                    ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION
+                    ) == PackageManager.PERMISSION_DENIED
+                ) {
+                    println("MediaProjection permission not granted, requesting permission")
 
+                    try {
                         // Solicitar el permiso si no ha sido concedido
                         ActivityCompat.requestPermissions(
                             this as Activity,
                             arrayOf(Manifest.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION),
                             REQUEST_CODE_MEDIA_PROJECTION
                         )
-                    } else {
-                        // Si ya está concedido, continuar normalmente
-                        startForegroundServiceWithNotification(intent)
+                    } catch (e: Exception) {
+                        // Expected: a Service cannot be cast to Activity / cannot request runtime
+                        // permissions. Swallow so we still reach startForeground() below.
+                        println("requestPermissions from service failed (expected): " + e.message)
                     }
-                } else {
-                    // Si no es Android 14, continuar normalmente
-                    startForegroundServiceWithNotification(intent)
                 }
+
+                // Always promote to the foreground so startForeground() runs within the system
+                // time window, regardless of the permission branch above.
+                startForegroundServiceWithNotification(intent)
 
                 return START_STICKY
             } catch (err: Exception) {
