@@ -37,11 +37,9 @@ class FlutterScreenRecordingPlugin :
 
     private var mScreenDensity: Int = 0
     var mMediaRecorder: MediaRecorder? = null
-    val mProjectionManager: MediaProjectionManager by lazy {
-        ContextCompat.getSystemService(
-            pluginBinding!!.applicationContext,
-            MediaProjectionManager::class.java
-        ) ?: throw Exception("MediaProjectionManager not found")
+    private fun projectionManager(): MediaProjectionManager? {
+        val context = pluginBinding?.applicationContext ?: return null
+        return ContextCompat.getSystemService(context, MediaProjectionManager::class.java)
     }
     var mMediaProjection: MediaProjection? = null
     var mMediaProjectionCallback: MediaProjectionCallback? = null
@@ -69,9 +67,14 @@ class FlutterScreenRecordingPlugin :
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
 
-        val context = pluginBinding!!.applicationContext
-
         if (requestCode == SCREEN_RECORD_REQUEST_CODE) {
+            val context = pluginBinding?.applicationContext
+            if (context == null) {
+                Log.w("ScreenRecordingPlugin", "Activity result with no plugin context; ignoring")
+                completePendingResult(false)
+                return true
+            }
+
             if (pendingResult == null) {
                 Log.w("ScreenRecordingPlugin", "Ignoring activity result with no pending callback")
                 if (resultCode != Activity.RESULT_OK) {
@@ -92,7 +95,9 @@ class FlutterScreenRecordingPlugin :
                         try {
                             startRecordScreen()
                             mMediaProjectionCallback = MediaProjectionCallback()
-                            mMediaProjection = mProjectionManager.getMediaProjection(resultCode, data!!)
+                            val projectionManager = projectionManager()
+                                ?: throw IllegalStateException("MediaProjectionManager is unavailable")
+                            mMediaProjection = projectionManager.getMediaProjection(resultCode, data!!)
                             mMediaProjection?.registerCallback(mMediaProjectionCallback!!, null)
                             mVirtualDisplay = createVirtualDisplay()
                             completePendingResult(true)
@@ -125,7 +130,11 @@ class FlutterScreenRecordingPlugin :
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
-        val appContext = pluginBinding!!.applicationContext
+        val appContext = pluginBinding?.applicationContext
+        if (appContext == null) {
+            result.error("NO_CONTEXT", "Plugin is not attached to a Flutter engine", null)
+            return
+        }
 
         when (call.method) {
             "startRecordScreen" -> {
@@ -139,6 +148,15 @@ class FlutterScreenRecordingPlugin :
                 }
 
                 try {
+                    val activity = activityBinding?.activity ?: run {
+                        result.error(
+                            "NO_ACTIVITY",
+                            "Screen recording requires a foreground Activity",
+                            null
+                        )
+                        return
+                    }
+
                     pendingResult = result
                     val title = call.argument<String?>("title")
                     val message = call.argument<String?>("message")
@@ -154,11 +172,11 @@ class FlutterScreenRecordingPlugin :
                     val metrics = DisplayMetrics()
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        val display = activityBinding!!.activity.display
+                        val display = activity.display
                         display?.getRealMetrics(metrics)
                     } else {
                         @Suppress("DEPRECATION")
-                        val defaultDisplay = activityBinding!!.activity.windowManager.defaultDisplay
+                        val defaultDisplay = activity.windowManager.defaultDisplay
                         @Suppress("DEPRECATION")
                         defaultDisplay?.getRealMetrics(metrics)
                     }
@@ -167,9 +185,19 @@ class FlutterScreenRecordingPlugin :
                     videoName = call.argument<String?>("name")
                     recordAudio = call.argument<Boolean?>("audio")
 
-                    val permissionIntent = mProjectionManager.createScreenCaptureIntent()
+                    val projectionManager = projectionManager() ?: run {
+                        pendingResult = null
+                        result.error(
+                            "NO_PROJECTION_MANAGER",
+                            "MediaProjectionManager is unavailable on this device",
+                            null
+                        )
+                        return
+                    }
+
+                    val permissionIntent = projectionManager.createScreenCaptureIntent()
                     ActivityCompat.startActivityForResult(
-                        activityBinding!!.activity,
+                        activity,
                         permissionIntent,
                         SCREEN_RECORD_REQUEST_CODE,
                         null
@@ -188,7 +216,7 @@ class FlutterScreenRecordingPlugin :
                     serviceConnection?.let {
                         appContext.unbindService(it)
                     }
-                    ForegroundService.stopService(pluginBinding!!.applicationContext)
+                    ForegroundService.stopService(appContext)
                     if (mMediaRecorder != null) {
                         stopRecordScreen()
                         result.success(mFileName)
@@ -328,25 +356,31 @@ class FlutterScreenRecordingPlugin :
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        pluginBinding = binding;
+        pluginBinding = binding
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {}
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
-        activityBinding = binding;
+        activityBinding = binding
         val channel = MethodChannel(pluginBinding!!.binaryMessenger, "flutter_screen_recording")
         channel.setMethodCallHandler(this)
-        activityBinding!!.addActivityResultListener(this)
+        binding.addActivityResultListener(this)
     }
 
-    override fun onDetachedFromActivityForConfigChanges() {}
+    override fun onDetachedFromActivityForConfigChanges() {
+        onDetachedFromActivity()
+    }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        activityBinding = binding;
+        activityBinding = binding
+        binding.addActivityResultListener(this)
     }
 
-    override fun onDetachedFromActivity() {}
+    override fun onDetachedFromActivity() {
+        activityBinding?.removeActivityResultListener(this)
+        activityBinding = null
+    }
 
     inner class MediaProjectionCallback : MediaProjection.Callback() {
         override fun onStop() {
