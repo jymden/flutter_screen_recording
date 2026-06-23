@@ -8,6 +8,35 @@ and `build.gradle`.
 *simultaneously* runs a camera preview (`Camera2`/`CameraX`) and an ML Kit analysis pipeline.
 **Out of scope:** the example app (do not modify).
 
+## Status overview
+
+**Progress: 4 of 19 addressed** (3 fully fixed, 1 partial). Sorted by severity. Click an issue
+code to jump to its full description.
+
+**Status legend:** 🟢 Fixed · 🟡 Partially fixed · 🟠 Open (not started)
+
+| Issue | Severity | Status | Summary |
+| --- | --- | --- | --- |
+| [H1](#h1) | High | 🟢 Fixed (2026-06-23) | Stale `Activity` binding + force-unwraps → NPE/crash and a leaked Activity |
+| [H2](#h2) | High | 🟡 Partial (2026-06-23) | `this as Activity` in `ForegroundService` → crash (crash-safe guard added; permission request kept for investigation) |
+| [H3](#h3) | High | 🟢 Fixed (2026-06-23) | Failed `start()` reported to Dart as success → empty file / state desync |
+| [M1](#m1) | Medium | 🟢 Fixed (2026-06-23) | `MediaRecorder` never `release()`d/nulled → native encoder leak |
+| [M2](#m2) | Medium | 🟠 Open | Microphone source contention with the camera/ML Kit pipeline (silent audio failure) |
+| [M3](#m3) | Medium | 🟠 Open | System/user-stopped projection is invisible to Dart |
+| [M4](#m4) | Medium | 🟠 Open | `getMediaProjection` vs. foreground-service ordering race (Android 14+) |
+| [M5](#m5) | Medium | 🟠 Open | Recorder `prepare()`/`start()` run on the main thread (ANR risk) |
+| [M6](#m6) | Medium | 🟠 Open | `stopService` via `startService` can throw in background |
+| [M7](#m7) | Medium | 🟠 Open | `MethodChannel` registered in the wrong lifecycle and never torn down |
+| [M8](#m8) | Medium | 🟠 Open | `pendingResult` can hang the Dart Future across process death / config change |
+| [M9](#m9) | Medium | 🟠 Open | Full physical-resolution recording can exceed encoder limits → silent `prepare()` failure |
+| [L1](#l1) | Low | 🟠 Open | `println`/`Log.d` debug logging throughout |
+| [L2](#l2) | Low | 🟠 Open | Heavy/unused dependencies and deprecated repositories |
+| [L3](#l3) | Low | 🟠 Open | Over-broad permissions force-merged into the host app |
+| [L4](#l4) | Low | 🟠 Open | `videoName` used unsanitized in the output path |
+| [L5](#l5) | Low | 🟠 Open | `POST_NOTIFICATIONS` (Android 13+) not handled |
+| [L6](#l6) | Low | 🟠 Open | `onDetachedFromEngine` performs no cleanup |
+| [L7](#l7) | Low | 🟠 Open | Cosmetic (logging tags, notification icon, magic numbers) |
+
 ## Files reviewed
 
 | File | Role |
@@ -69,7 +98,7 @@ cheap insurance.
 
 ## HIGH risk
 
-### H1 — Stale `Activity` binding + force-unwraps → NPE/crash and a leaked Activity — ✅ FIXED (2026-06-23)
+### <a id="h1"></a>H1 — Stale `Activity` binding + force-unwraps → NPE/crash and a leaked Activity — ✅ FIXED (2026-06-23)
 
 > **Status:** Implemented in `FlutterScreenRecordingPlugin.kt`.
 > (a) `onDetachedFromActivity()` now removes the `ActivityResultListener` and nulls
@@ -133,7 +162,7 @@ elsewhere.
 
 ---
 
-### H2 — `ForegroundService` requests permissions via `this as Activity` → `ClassCastException` crash — 🟡 PARTIALLY FIXED (2026-06-23)
+### <a id="h2"></a>H2 — `ForegroundService` requests permissions via `this as Activity` → `ClassCastException` crash — 🟡 PARTIALLY FIXED (2026-06-23)
 
 > **Status:** Crash-safe guard implemented in `ForegroundService.kt`; the permission-request
 > logic was intentionally **kept** for further investigation (per request).
@@ -205,7 +234,7 @@ denied. It is dead-but-dangerous code.
 
 ---
 
-### H3 — `startRecordScreen()` swallows failures but the caller reports success → state desync + later `stop()` crash — ✅ FIXED (2026-06-23)
+### <a id="h3"></a>H3 — `startRecordScreen()` swallows failures but the caller reports success → state desync + later `stop()` crash — ✅ FIXED (2026-06-23)
 
 > **Status:** Implemented in `FlutterScreenRecordingPlugin.kt`.
 > (a) `startRecordScreen()` now returns `Boolean` — `true` only after `prepare()` + `start()`
@@ -267,7 +296,7 @@ Dart — the single most likely real-world failure in a concurrent-camera app.
 
 ## MEDIUM risk
 
-### M1 — `MediaRecorder` is never `release()`d or nulled → native encoder leak — ✅ FIXED (2026-06-23)
+### <a id="m1"></a>M1 — `MediaRecorder` is never `release()`d or nulled → native encoder leak — ✅ FIXED (2026-06-23)
 
 > **Status:** Implemented in `FlutterScreenRecordingPlugin.kt`. Added a single crash-safe
 > `releaseMediaRecorder()` helper that `reset()` + `release()`s the recorder (release was
@@ -302,7 +331,7 @@ finally {
 ```
 Apply the same `release()`+null in `MediaProjectionCallback.onStop`.
 
-### M2 — Microphone source contention with the host camera/ML Kit pipeline (silent audio failure)
+### <a id="m2"></a>M2 — Microphone source contention with the host camera/ML Kit pipeline (silent audio failure)
 
 **Where:** `startRecordScreen`, audio branch (264–267): `setAudioSource(MIC)` +
 `recordAudio!!` force-unwrap.
@@ -323,7 +352,7 @@ defaults from `call.argument<Boolean?>`), though it's currently inside the swall
    recommend video-only while a camera/audio capture session is live — mirror the iOS "Using
    alongside a camera" guidance.
 
-### M3 — System/user revocation of the projection is invisible to Dart
+### <a id="m3"></a>M3 — System/user revocation of the projection is invisible to Dart
 
 **Where:** `MediaProjectionCallback.onStop` (351–357).
 
@@ -338,7 +367,7 @@ event from `onStop` and from the H3 failure path (`{"event":"stopped","reason":�
 cache the last failure/stop reason and return it from the next `stopRecordScreen` instead of a
 bare `""`.
 
-### M4 — `getMediaProjection` vs. foreground-service ordering race (Android 14+)
+### <a id="m4"></a>M4 — `getMediaProjection` vs. foreground-service ordering race (Android 14+)
 
 **Where:** `onActivityResult` (83–116): `ForegroundService.startService(...)` (async via
 `startForegroundService`) is called, then `bindService`, and `getMediaProjection(...)` runs inside
@@ -357,7 +386,7 @@ the **service signal readiness** (e.g. the bound `Binder` exposes an `isForegrou
 `getMediaProjection`. Alternatively, request the projection and pass the token into the service,
 and create the projection inside the service immediately after `startForeground`.
 
-### M5 — `MediaRecorder.prepare()/start()` run synchronously on the main thread (ANR)
+### <a id="m5"></a>M5 — `MediaRecorder.prepare()/start()` run synchronously on the main thread (ANR)
 
 **Where:** `onServiceConnected` → `startRecordScreen` executes on the main thread (service
 callbacks are main-thread by default).
@@ -370,7 +399,7 @@ analogous concern.)
 `completePendingResult` back to the main thread. Pass that handler to `createVirtualDisplay`'s
 callback argument too (currently `null`).
 
-### M6 — `stopService` via `startService(stopIntent)` can throw in background
+### <a id="m6"></a>M6 — `stopService` via `startService(stopIntent)` can throw in background
 
 **Where:** `ForegroundService.stopService` (42–46): `context.startService(stopIntent)`.
 
@@ -384,7 +413,7 @@ caller side.
 termination, or guard the `startService` call in a `try/catch` and no-op if the service isn't
 running. Make stop idempotent.
 
-### M7 — `MethodChannel` registered in `onAttachedToActivity` and never torn down
+### <a id="m7"></a>M7 — `MethodChannel` registered in `onAttachedToActivity` and never torn down
 
 **Where:** `onAttachedToActivity` (336–341) creates the `MethodChannel`;
 `onDetachedFromEngine` (334) and `onDetachedFromActivity` (349) are empty.
@@ -410,7 +439,7 @@ override fun onDetachedFromEngine(binding) {
 ```
 Register/unregister the activity-result listener in the activity callbacks (see H1).
 
-### M8 — `pendingResult` can hang the Dart Future across process death / config change
+### <a id="m8"></a>M8 — `pendingResult` can hang the Dart Future across process death / config change
 
 **Where:** `pendingResult` (58); `onActivityResult` no-pending branch (75–81).
 
@@ -428,7 +457,7 @@ without producing a result, `pendingResult` stays set and every subsequent call 
 2. Consider persisting minimal state so a recreated instance can fail the pending result cleanly.
 3. Add a defensive `.timeout(...)` in the Dart layer as a backstop.
 
-### M9 — Recording at full physical resolution can exceed encoder limits → silent `prepare()` failure
+### <a id="m9"></a>M9 — Recording at full physical resolution can exceed encoder limits → silent `prepare()` failure
 
 **Where:** `calculateResolution` (209–229) uses `metrics.widthPixels/heightPixels`;
 `setVideoSize` (272) + `setVideoEncodingBitRate` (274).
@@ -447,19 +476,19 @@ encoder instance.
 
 ## LOW risk / polish
 
-### L1 — `println` / `Log.d` debug logging throughout
+### <a id="l1"></a>L1 — `println` / `Log.d` debug logging throughout
 `FlutterScreenRecordingPlugin.kt` and `ForegroundService.kt` are full of `println("---- …")`
 and `println(e.message)`. These go to stdout (logcat) unfiltered in release, are noisy, and leak
 internal paths. Switch to a single tagged `Log` wrapper gated on `BuildConfig.DEBUG`.
 
-### L2 — Heavy/unused dependencies and deprecated repositories
+### <a id="l2"></a>L2 — Heavy/unused dependencies and deprecated repositories
 `build.gradle` pulls `com.github.HBiSoft:HBRecorder:2.0.5` (the plugin uses `MediaRecorder`
 directly — **HBRecorder appears unused**) and adds the `bytedance`/`Volcengine` maven repo plus
 the sunset `jcenter()`. Unused deps bloat the host APK and the extra repos slow/риск builds.
 Remove HBRecorder if it is genuinely unused, drop `jcenter()`, and remove the Volcengine repo if
 nothing needs it.
 
-### L3 — Over-broad permissions force-merged into the host app
+### <a id="l3"></a>L3 — Over-broad permissions force-merged into the host app
 The plugin manifest unconditionally declares `RECORD_AUDIO`, `SYSTEM_ALERT_WINDOW`,
 `RECEIVE_BOOT_COMPLETED`, and `WAKE_LOCK`. Via manifest merging these are added to **every host
 app** — including your camera/ML Kit app — even for video-only screen recording.
@@ -469,21 +498,21 @@ if needed), and drop `SYSTEM_ALERT_WINDOW`/`RECEIVE_BOOT_COMPLETED` unless a fea
 needs them (the boot/wakelock behavior comes from `flutter_foreground_task`'s `autoRunOnBoot`,
 which is questionable for a screen recorder).
 
-### L4 — `videoName` used unsanitized in the output path
+### <a id="l4"></a>L4 — `videoName` used unsanitized in the output path
 `mFileName += "/$videoName.mp4"` (257). A null name yields `null.mp4`; a name containing `/` or
 `..` injects into the path. Validate/sanitize the name and reject empty/null with a clear error.
 
-### L5 — `POST_NOTIFICATIONS` (Android 13+) not handled
+### <a id="l5"></a>L5 — `POST_NOTIFICATIONS` (Android 13+) not handled
 The foreground-service notification requires `POST_NOTIFICATIONS` at runtime on API 33+. If the
 host hasn't been granted it, the notification is silently absent (the FGS still runs, but UX is
 degraded and some OEMs are stricter). Document that the host must request it, or request it as
 part of the start flow.
 
-### L6 — `onDetachedFromEngine` performs no cleanup
+### <a id="l6"></a>L6 — `onDetachedFromEngine` performs no cleanup
 Empty (334). Combined with M7, nothing is released on engine detach. Null out bindings, channel,
 and any in-flight recorder/projection here.
 
-### L7 — Cosmetic
+### <a id="l7"></a>L7 — Cosmetic
 Mixed-language comments (Spanish in `ForegroundService`), a system framework drawable as the
 notification icon (`android.R.drawable.presence_video_online`), the trailing-semicolon Kotlin
 style, and magic numbers (`SCREEN_RECORD_REQUEST_CODE = 333`, hard-coded `30` fps). Low impact;
