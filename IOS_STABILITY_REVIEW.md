@@ -83,7 +83,22 @@ process.
 
 ---
 
-### H2 — Microphone path can hard-crash and/or break the host camera session
+### H2 — Microphone path can hard-crash and/or break the host camera session — ✅ FIXED (2026-06-23)
+
+> **Status:** Implemented in `SwiftFlutterScreenRecordingPlugin.swift` + README.
+> (a) Added `hasMicrophoneUsageDescription()` and a preflight at the top of
+> `startRecording`: when audio is requested but `NSMicrophoneUsageDescription` is
+> missing/empty, it fails with `FlutterError("MIC_USAGE_DESCRIPTION_MISSING", …)` before
+> any writer state exists — turning the TCC hard-crash into a catchable error.
+> (b) Added `configureAudioSessionForCoexistence()` (called only when audio is requested,
+> before `startCapture`): conservatively adds `AVAudioSession`'s `.mixWithOthers` option
+> while preserving the host's category/mode, never calling `setActive`, treating errors as
+> non-fatal — so it won't interrupt or stomp on the host camera `AVCaptureSession`.
+> README now documents the mandatory mic key and a "Using alongside a camera /
+> AVCaptureSession" section. Verified: example app builds for simulator (0 errors).
+> A future improvement (deferred): observe `AVAudioSession.interruptionNotification` to
+> re-finalize gracefully — tracked under M4. Original analysis below.
+
 
 **Where:** `recorder.isMicrophoneEnabled = recordAudio` (line 148) and the audio-input setup
 (299–318); triggered by `startRecordScreenAndAudio`.
@@ -131,7 +146,23 @@ cases stall the capture pipeline that ML Kit feeds from.
 
 ---
 
-### H3 — No availability / busy-state preflight before `startCapture`
+### H3 — No availability / busy-state preflight before `startCapture` — ✅ FIXED (2026-06-23)
+
+> **Status:** Implemented in `SwiftFlutterScreenRecordingPlugin.swift`. Added a
+> `guard recorder.isAvailable` preflight at the top of `startRecording` (before any
+> writer/AVAssetWriter state is created) that fails fast with
+> `FlutterError("RECORDER_UNAVAILABLE", …)`. This turns slow/opaque `startCapture`
+> failures (AirPlay/mirroring active, Screen Time/MDM restriction, another capturer
+> holding the singleton) into an immediate, descriptive error and avoids briefly
+> creating-then-discarding a writer. Verified: example app builds for simulator (0 errors).
+>
+> **Deferred (the "consider" part):** setting `recorder.delegate` for
+> `screenRecorderDidChangeAvailability(_:)`. For `startCapture`-based recording, mid-session
+> failures already surface through the capture handler's error path, so a delegate would
+> largely duplicate that and risks false-positive teardowns from transient availability
+> flicker. Revisit alongside M4 (interruption/lifecycle handling) if richer signalling is
+> wanted. Original analysis below.
+
 
 **Where:** `startRecording`, around line 148–149. The code guards its *own* `isRecording`
 flag but never consults ReplayKit's actual state.

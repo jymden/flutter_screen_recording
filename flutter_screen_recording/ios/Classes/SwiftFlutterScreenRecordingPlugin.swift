@@ -84,6 +84,22 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
 
+        // RPScreenRecorder is a process-wide singleton. If screen recording is currently
+        // unavailable (Screen Time / MDM restriction, AirPlay or mirroring active, a prior
+        // session still tearing down, or another capturer holding it), fail fast with a
+        // clear error rather than relying solely on the slower startCapture failure path.
+        guard recorder.isAvailable else {
+            deliver(
+                FlutterError(
+                    code: "RECORDER_UNAVAILABLE",
+                    message: "Screen recording is currently unavailable. Stop AirPlay/mirroring or any other active recording and try again.",
+                    details: nil
+                ),
+                to: result
+            )
+            return
+        }
+
         // Enabling RPScreenRecorder's microphone without NSMicrophoneUsageDescription
         // makes iOS terminate the app — a privacy (TCC) kill that cannot be caught.
         // Refuse the audio request up front so a misconfigured Info.plist degrades to a
