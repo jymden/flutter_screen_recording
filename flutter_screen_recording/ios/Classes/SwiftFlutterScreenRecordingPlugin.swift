@@ -293,7 +293,15 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
                 return
             }
 
-            writer.add(newVideoInput)
+            do {
+                try FSRAssetWriterBridge.add(newVideoInput, to: writer)
+            } catch {
+                failRecording(
+                    id: recordingID,
+                    reason: "AVAssetWriter failed to add the video input: \(error.localizedDescription)"
+                )
+                return
+            }
             videoWriterInput = newVideoInput
 
             if recordAudio {
@@ -309,24 +317,40 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
                 newAudioInput.expectsMediaDataInRealTime = true
 
                 if writer.canAdd(newAudioInput) {
-                    writer.add(newAudioInput)
-                    audioWriterInput = newAudioInput
+                    do {
+                        try FSRAssetWriterBridge.add(newAudioInput, to: writer)
+                        audioWriterInput = newAudioInput
+                    } catch {
+                        // Video is still useful if the mic input cannot be added.
+                        print("flutter_screen_recording: failed to add the audio input; recording without audio: \(error.localizedDescription)")
+                    }
                 } else {
                     // Video is still useful if this device cannot add the requested mic input.
                     print("flutter_screen_recording: AVAssetWriter cannot add the audio input; recording without audio")
                 }
             }
 
-            guard writer.startWriting() else {
+            let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            // startSession(atSourceTime:) throws an uncatchable NSException if the
+            // time is not numeric, so reject such a first frame up front.
+            guard presentationTime.isNumeric else {
                 failRecording(
                     id: recordingID,
-                    reason: "AVAssetWriter failed to start: \(writer.error?.localizedDescription ?? "unknown error")"
+                    reason: "First video buffer has a non-numeric presentation timestamp"
                 )
                 return
             }
 
-            let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            writer.startSession(atSourceTime: presentationTime)
+            do {
+                try FSRAssetWriterBridge.startWriting(writer, atSourceTime: presentationTime)
+            } catch {
+                failRecording(
+                    id: recordingID,
+                    reason: "AVAssetWriter failed to start: \(error.localizedDescription)"
+                )
+                return
+            }
+
             sessionStartTime = presentationTime
             sessionStarted = true
         }
@@ -473,36 +497,68 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
                     return
                 }
 
-                self.videoWriterInput?.markAsFinished()
-                self.audioWriterInput?.markAsFinished()
+                do {
+                    if let videoInput = self.videoWriterInput {
+                        try FSRAssetWriterBridge.markAsFinished(videoInput)
+                    }
+                    if let audioInput = self.audioWriterInput {
+                        try FSRAssetWriterBridge.markAsFinished(audioInput)
+                    }
+                } catch {
+                    self.cancelAndResetWriterState(removeOutput: true)
+                    self.deliver(
+                        FlutterError(
+                            code: "STOP_ERROR",
+                            message: "Failed to finalize the recording inputs",
+                            details: error.localizedDescription
+                        ),
+                        to: result
+                    )
+                    return
+                }
+
                 let outputPath = self.videoOutputURL?.path
 
-                writer.finishWriting { [weak self] in
-                    guard let self = self else { return }
+                do {
+                    try FSRAssetWriterBridge.finishWriting(writer) { [weak self] in
+                        guard let self = self else { return }
 
-                    self.writerQueue.async {
-                        guard self.recordingID == stoppingRecordingID else {
-                            return
-                        }
+                        self.writerQueue.async {
+                            guard self.recordingID == stoppingRecordingID else {
+                                return
+                            }
 
-                        let status = writer.status
-                        let writerError = writer.error?.localizedDescription
-                        self.resetWriterState()
+                            let status = writer.status
+                            let writerError = writer.error?.localizedDescription
+                            self.resetWriterState()
 
-                        if status == .completed, let outputPath = outputPath {
-                            self.deliver(outputPath, to: result)
-                        } else {
-                            self.removeOutputFile(atPath: outputPath)
-                            self.deliver(
-                                FlutterError(
-                                    code: "STOP_ERROR",
-                                    message: "Failed to finish writing",
-                                    details: writerError
-                                ),
-                                to: result
-                            )
+                            if status == .completed, let outputPath = outputPath {
+                                self.deliver(outputPath, to: result)
+                            } else {
+                                self.removeOutputFile(atPath: outputPath)
+                                self.deliver(
+                                    FlutterError(
+                                        code: "STOP_ERROR",
+                                        message: "Failed to finish writing",
+                                        details: writerError
+                                    ),
+                                    to: result
+                                )
+                            }
                         }
                     }
+                } catch {
+                    // finishWriting threw synchronously, so its completion handler
+                    // will never run; report and clean up here instead.
+                    self.cancelAndResetWriterState(removeOutput: true)
+                    self.deliver(
+                        FlutterError(
+                            code: "STOP_ERROR",
+                            message: "Failed to finish writing",
+                            details: error.localizedDescription
+                        ),
+                        to: result
+                    )
                 }
             }
         }
