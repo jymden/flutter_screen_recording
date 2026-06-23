@@ -17,5 +17,6 @@ A new Flutter plugin for record the screen.
   s.dependency 'Flutter'
 
   s.ios.deployment_target = '10.0'
+  s.swift_version = '5.0'
 end
 

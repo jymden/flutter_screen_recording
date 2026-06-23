@@ -26,6 +26,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     private var isRecording = false
     private var recordAudio = false
     private var sessionStarted = false
+    private var sessionStartTime: CMTime?
     private var lastWrittenVideoTimestamp: CMTime?
     private var startInterfaceOrientation: UIInterfaceOrientation = .unknown
 
@@ -326,6 +327,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
 
             let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: presentationTime)
+            sessionStartTime = presentationTime
             sessionStarted = true
         }
 
@@ -350,12 +352,13 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
 
-        if input.append(sampleBuffer) {
+        do {
+            try FSRSampleBufferAppender.append(sampleBuffer, to: input)
             lastWrittenVideoTimestamp = presentationTime
-        } else {
+        } catch {
             failRecording(
                 id: recordingID,
-                reason: "Failed to append a video buffer: \(writer.error?.localizedDescription ?? "unknown error")"
+                reason: "Failed to append a video buffer: \(error.localizedDescription)"
             )
         }
     }
@@ -374,10 +377,20 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             return
         }
 
-        if !input.append(sampleBuffer) {
+        // The session is started from the first video frame, so mic samples can
+        // carry timestamps that are invalid or earlier than the session start.
+        // Appending those makes appendSampleBuffer: throw, so drop them instead.
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if shouldDropAudioBuffer(at: presentationTime) {
+            return
+        }
+
+        do {
+            try FSRSampleBufferAppender.append(sampleBuffer, to: input)
+        } catch {
             failRecording(
                 id: recordingID,
-                reason: "Failed to append an audio buffer: \(writer.error?.localizedDescription ?? "unknown error")"
+                reason: "Failed to append an audio buffer: \(error.localizedDescription)"
             )
         }
     }
@@ -587,6 +600,18 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         ) < 0
     }
 
+    private func shouldDropAudioBuffer(at timestamp: CMTime) -> Bool {
+        guard timestamp.isValid else {
+            return true
+        }
+
+        guard let sessionStartTime = sessionStartTime, sessionStartTime.isValid else {
+            return false
+        }
+
+        return CMTimeCompare(timestamp, sessionStartTime) < 0
+    }
+
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
         if #available(iOS 13.0, *) {
             return UIApplication.shared.connectedScenes
@@ -636,6 +661,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
         isRecording = false
         recordAudio = false
         sessionStarted = false
+        sessionStartTime = nil
         lastWrittenVideoTimestamp = nil
         startInterfaceOrientation = .unknown
     }
